@@ -95,6 +95,7 @@ atoi(const char *s)
   return n;
 }
 
+// 将vsrc开始的n个字符赋值给vdst
 void*
 memmove(void *vdst, const void *vsrc, int n)
 {
@@ -103,14 +104,14 @@ memmove(void *vdst, const void *vsrc, int n)
 
   dst = vdst;
   src = vsrc;
-  if (src > dst) {
-    while(n-- > 0)
-      *dst++ = *src++;
-  } else {
-    dst += n;
-    src += n;
-    while(n-- > 0)
-      *--dst = *--src;
+  if (src > dst) { // 如果src的起始位置在dst后面，则从前往后复制，防止src被修改
+      while (n-- > 0)
+          *dst++ = *src++;
+  } else { // 如果src的起始位置在dst前面，则需要从src的最后位置开始，向前移动复制
+      dst += n;
+      src += n;
+      while (n-- > 0)
+          *--dst = *--src;
   }
   return vdst;
 }

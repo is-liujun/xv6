@@ -2,6 +2,7 @@
 #include "kernel/stat.h"
 #include "user/user.h"
 
+// echo会自动在非末尾参数后面添加一个空格，在最后一个参数后面添加一个'\n'
 int
 main(int argc, char *argv[])
 {

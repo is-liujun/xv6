@@ -3,6 +3,7 @@
 #include "user/user.h"
 #include "kernel/fs.h"
 
+// 从文件的path中截取出文件名
 char*
 fmtname(char *path)
 {
@@ -46,6 +47,7 @@ ls(char *path)
     printf("%s %d %d %l\n", fmtname(path), st.type, st.ino, st.size);
     break;
 
+  // 如果是目录，则先获取每个目录项中文件的完整路径，再从过完整路径获取文件的信息
   case T_DIR:
     if(strlen(path) + 1 + DIRSIZ + 1 > sizeof buf){
       printf("ls: path too long\n");
@@ -57,11 +59,11 @@ ls(char *path)
     while(read(fd, &de, sizeof(de)) == sizeof(de)){
       if(de.inum == 0)
         continue;
-      memmove(p, de.name, DIRSIZ);
-      p[DIRSIZ] = 0;
-      if(stat(buf, &st) < 0){
-        printf("ls: cannot stat %s\n", buf);
-        continue;
+      memmove(p, de.name, DIRSIZ); // 固定被复制的名字长度为DIRSIZ个
+      p[DIRSIZ] = 0;               // 在这里就得到了一个目录项的完整路径
+      if (stat(buf, &st) < 0) {    // 获取当前目录项中的文件的信息
+          printf("ls: cannot stat %s\n", buf);
+          continue;
       }
       printf("%s %d %d %d\n", fmtname(buf), st.type, st.ino, st.size);
     }
