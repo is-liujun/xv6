@@ -14,11 +14,12 @@ main(int argc, char *argv[])
     exit(1);
   }
 
-  if (trace(atoi(argv[1])) < 0) {
-    fprintf(2, "%s: trace failed\n", argv[0]);
-    exit(1);
+  if (trace(atoi(argv[1]))
+      < 0) { // 系统调用的接口是SYS_trace，SYS_trace非常重要，是在内核中跟相应的系统调用号的宏
+      fprintf(2, "%s: trace failed\n", argv[0]);
+      exit(1);
   }
-  
+
   for(i = 2; i < argc && i < MAXARG; i++){
     nargv[i-2] = argv[i];
   }

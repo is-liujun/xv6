@@ -80,3 +80,19 @@ kalloc(void)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
 }
+
+// 获取空闲内存
+// xv6中，使用简单的空闲链表机制来记录空闲的物理内存页
+// 空闲页自身作为链表节点，指向下一个空闲页
+void kama_freebytes(uint64 *dst) {
+    *dst = 0;
+    struct run *p = kmem.freelist;
+
+    acquire(&kmem.lock);
+    while (p) {
+        *dst += PGSIZE;
+        p = p->next;
+    }
+
+    release(&kmem.lock);
+}
