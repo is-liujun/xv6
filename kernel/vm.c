@@ -68,23 +68,30 @@ kvminithart()
 //   21..29 -- 9 bits of level-1 index.
 //   12..20 -- 9 bits of level-0 index.
 //    0..11 -- 12 bits of byte offset within the page.
+// pagetable 页表根指针； va要映射或查找的虚拟地址；
+// alloc是否允许在缺页时自动分配新的页表页,1表示允许，0不允许
 pte_t *
 walk(pagetable_t pagetable, uint64 va, int alloc)
 {
-  if(va >= MAXVA)
-    panic("walk");
+    if (va >= MAXVA)   // 检查是否超过最大虚拟地址范围
+        panic("walk"); // 如果超过则直接终止
 
-  for(int level = 2; level > 0; level--) {
-    pte_t *pte = &pagetable[PX(level, va)];
-    if(*pte & PTE_V) {
-      pagetable = (pagetable_t)PTE2PA(*pte);
-    } else {
-      if(!alloc || (pagetable = (pde_t*)kalloc()) == 0)
-        return 0;
-      memset(pagetable, 0, PGSIZE);
-      *pte = PA2PTE(pagetable) | PTE_V;
+    for (int level = 2; level > 0; level--) {
+        // PX用于提取第level级页表的索引
+        // pte是当前页表项的地址
+        pte_t *pte = &pagetable[PX(level, va)];
+
+        if (*pte & PTE_V) { // PTE_V是页表项的有效位
+            // 将页表项中的物理地址部分提取出来，作为下一层页表的起始地址
+            pagetable = (pagetable_t)PTE2PA(*pte);
+        } else {
+            if (!alloc || (pagetable = (pde_t *)kalloc()) == 0)
+                return 0;
+            memset(pagetable, 0, PGSIZE);
+            // 将物理地址转换成页表格模式，加上有效位
+            *pte = PA2PTE(pagetable) | PTE_V;
+        }
     }
-  }
   return &pagetable[PX(0, va)];
 }
 
@@ -131,7 +138,7 @@ kvmpa(uint64 va)
   uint64 off = va % PGSIZE;
   pte_t *pte;
   uint64 pa;
-  
+
   pte = walk(kernel_pagetable, va, 0);
   if(pte == 0)
     panic("kvmpa");
@@ -341,7 +348,7 @@ void
 uvmclear(pagetable_t pagetable, uint64 va)
 {
   pte_t *pte;
-  
+
   pte = walk(pagetable, va, 0);
   if(pte == 0)
     panic("uvmclear");
@@ -439,4 +446,30 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+int kama_pgtblprint(pagetable_t pagetable, int depth) {
+    for (int i = 0; i < 512; ++i) {
+        pte_t pte = pagetable[i];
+
+        if (pte & PTE_V) {
+            printf("..");
+            for (int j = 0; j < depth; ++j) {
+                printf("..");
+            }
+            printf("%d: pte %p pa %p \n", i, pte, PTE2PA(pte));
+
+            // 如果该节点不是叶节点，则递归打印子节点
+            if ((pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+                uint64 child = PTE2PA(pte);
+                kama_pgtblprint((pagetable_t)child, depth + 1);
+            }
+        }
+    }
+    return 0;
+}
+
+int kama_vmprint(pagetable_t pagetable) {
+    printf("page table %p\n", pagetable);
+    return kama_pgtblprint(pagetable, 0);
 }
