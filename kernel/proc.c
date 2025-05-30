@@ -26,7 +26,7 @@ void
 procinit(void)
 {
   struct proc *p;
-  
+
   initlock(&pid_lock, "nextpid");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
@@ -34,12 +34,12 @@ procinit(void)
       // Allocate a page for the process's kernel stack.
       // Map it high in memory, followed by an invalid
       // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+      // char *pa = kalloc();
+      // if(pa == 0)
+      //   panic("kalloc");
+      // uint64 va = KSTACK((int) (p - proc));
+      // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+      // p->kstack = va;
   }
   kvminithart();
 }
@@ -76,7 +76,7 @@ myproc(void) {
 int
 allocpid() {
   int pid;
-  
+
   acquire(&pid_lock);
   pid = nextpid;
   nextpid = nextpid + 1;
@@ -89,6 +89,8 @@ allocpid() {
 // If found, initialize state required to run in the kernel,
 // and return with p->lock held.
 // If there are no free procs, or a memory allocation fails, return 0.
+// 修改后：在创建进程的时候，为进程建立独立的内核页表
+// 然后将专属的内核栈固定到内核页表的固定位置，建立映射
 static struct proc*
 allocproc(void)
 {
@@ -121,6 +123,18 @@ found:
     return 0;
   }
 
+  // 为进程创建独立的内核页表，并将内核需要的各种映射添加到新页表上
+  p->kama_kernelpgtbl = kama_kvminit_newpgtbl();
+
+  // 分配一个物理页， 作为新进程的内核栈使用
+  char *pa = kalloc();
+  if (pa == 0) {
+      panic("kalloc");
+  }
+  uint64 va = KSTACK((int)0); // 将内核栈映射到固定的逻辑地址上
+  kvmmap(p->kama_kernelpgtbl, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va; // 记录内核栈的虚拟地址
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -128,6 +142,21 @@ found:
   p->context.sp = p->kstack + PGSIZE;
 
   return p;
+}
+
+void kama_kvm_free_kernelpgtbl(pagetable_t pagetable) {
+    for (int i = 0; i < 512; ++i) {
+        pte_t pte = pagetable[i];
+        uint64 child = PTE2PA(pte);
+
+        if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+            kama_kvm_free_kernelpgtbl((pagetable_t)child);
+            pagetable[i] = 0;
+        }
+    }
+
+    // 释放当前级别页表所占用空间
+    kfree((void *)pagetable);
 }
 
 // free a proc structure and the data hanging from it,
@@ -149,6 +178,19 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->state = UNUSED;
+
+  // 释放进程的内核栈
+  void *kstack_pa = (void *)kvmpa(p->kama_kernelpgtbl,
+                                  p->kstack); // 将栈的虚拟地址转换成物理地址
+  kfree(kstack_pa);
+  p->kstack = 0;
+
+  // 千万不能使用proc_freepagetable释放页表,因为它不仅仅释放页表本身，
+  // 还会把页表内所有的叶节点对应的物理页也释放掉
+  // 这样会导致内核运行所需要的关键物理页被释放掉，造成内核崩溃
+  kama_kvm_free_kernelpgtbl(p->kama_kernelpgtbl);
+  p->kama_kernelpgtbl = 0;
   p->state = UNUSED;
 }
 
@@ -215,11 +257,14 @@ userinit(void)
 
   p = allocproc();
   initproc = p;
-  
+
   // allocate one user page and copy init's instructions
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+
+  // 同步程序内存映射到进程内核页表中
+  kama_kvmcopymappings(p->pagetable, p->kama_kernelpgtbl, 0, p->sz);
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
@@ -243,11 +288,23 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
-      return -1;
-    }
+      uint64 newsz;
+      if ((newsz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+          return -1;
+      }
+
+      // 内核页表中的映射同步扩大
+      if (kama_kvmcopymappings(p->pagetable, p->kama_kernelpgtbl, sz, n) != 0) {
+          uvmdealloc(p->pagetable, newsz,
+                     sz); // 如果kama_kvmcopymappings失败了，则进行资源回收
+          return -1;
+      }
+      sz = newsz;
+
   } else if(n < 0){
-    sz = uvmdealloc(p->pagetable, sz, sz + n);
+      uvmdealloc(p->pagetable, sz, sz + n);
+      // 内核页表中的映射同步缩小
+      sz = kama_kvmdealloc(p->kama_kernelpgtbl, sz, sz + n);
   }
   p->sz = sz;
   return 0;
@@ -268,11 +325,16 @@ fork(void)
   }
 
   // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
-    freeproc(np);
-    release(&np->lock);
-    return -1;
+  // 再将新进程用户页表映射拷贝一份到新进程的内核页表中
+  if (uvmcopy(p->pagetable, np->pagetable, p->sz) < 0
+      || kama_kvmcopymappings(np->pagetable, np->kama_kernelpgtbl, 0,
+                              p->sz) // sz是用户空间的大小
+             < 0) {
+      freeproc(np);
+      release(&np->lock);
+      return -1;
   }
+
   np->sz = p->sz;
 
   np->parent = p;
@@ -369,7 +431,7 @@ exit(int status)
   acquire(&p->lock);
   struct proc *original_parent = p->parent;
   release(&p->lock);
-  
+
   // we need the parent's lock in order to wake it up from wait().
   // the parent-then-child rule says we have to lock it first.
   acquire(&original_parent->lock);
@@ -440,7 +502,7 @@ wait(uint64 addr)
       release(&p->lock);
       return -1;
     }
-    
+
     // Wait for a child to exit.
     sleep(p, &p->lock);  //DOC: wait-sleep
   }
@@ -458,12 +520,12 @@ scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
-  
+
   c->proc = 0;
   for(;;){
     // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
-    
+
     int found = 0;
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
@@ -473,7 +535,16 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        // 切换到进程独立的内核页表
+        w_satp(MAKE_SATP(p->kama_kernelpgtbl));
+        sfence_vma(); // 清空快表缓存，刷新tlb缓存，以确保地址转换表的更改生效
+
+        // 调度，执行进程
         swtch(&c->context, &p->context);
+
+        // 进程执行完毕了, 切回全局内核页表
+        kvminithart();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
@@ -559,7 +630,7 @@ void
 sleep(void *chan, struct spinlock *lk)
 {
   struct proc *p = myproc();
-  
+
   // Must acquire p->lock in order to
   // change p->state and then call sched.
   // Once we hold p->lock, we can be

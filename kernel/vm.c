@@ -18,33 +18,38 @@ extern char trampoline[]; // trampoline.S
 /*
  * create a direct-map page table for the kernel.
  */
-void
-kvminit()
-{
-  kernel_pagetable = (pagetable_t) kalloc();
-  memset(kernel_pagetable, 0, PGSIZE);
 
-  // uart registers
-  kvmmap(UART0, UART0, PGSIZE, PTE_R | PTE_W);
+// 将各种内核需要的direct mapping添加到页表pgtbl中
+void kama_kvm_map_pagetable(pagetable_t pgtbl) {
+    kvmmap(pgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+    kvmmap(pgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
 
-  // virtio mmio disk interface
-  kvmmap(VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+    // CLINT仅在内核启动的时候需要使用，而用户进程在内核态中的操作并不需要使用到该映射
+    // 并且该映射会与要map的程序内存冲突
+    //  kvmmap(pgtbl, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
 
-  // CLINT
-  kvmmap(CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+    kvmmap(pgtbl, PLIC, PLIC, 0X400000, PTE_R | PTE_W);
 
-  // PLIC
-  kvmmap(PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+    kvmmap(pgtbl, KERNBASE, KERNBASE, (uint64)etext - KERNBASE, PTE_R | PTE_X);
 
-  // map kernel text executable and read-only.
-  kvmmap(KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+    kvmmap(pgtbl, (uint64)etext, (uint64)etext, PHYSTOP - (uint64)etext,
+           PTE_R | PTE_W);
+    kvmmap(pgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+}
 
-  // map kernel data and the physical RAM we'll make use of.
-  kvmmap((uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+// 创建一个页表，并初始化映射
+pagetable_t kama_kvminit_newpgtbl() {
+    pagetable_t pgtbl = (pagetable_t)kalloc();
+    memset(pgtbl, 0, PGSIZE);
 
-  // map the trampoline for trap entry/exit to
-  // the highest virtual address in the kernel.
-  kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+    kama_kvm_map_pagetable(pgtbl);
+
+    return pgtbl;
+}
+
+void kvminit() {
+    kernel_pagetable = kama_kvminit_newpgtbl();
+    kvmmap(kernel_pagetable, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
 }
 
 // Switch h/w page table register to the kernel's page table,
@@ -121,31 +126,27 @@ walkaddr(pagetable_t pagetable, uint64 va)
 // add a mapping to the kernel page table.
 // only used when booting.
 // does not flush TLB or enable paging.
-void
-kvmmap(uint64 va, uint64 pa, uint64 sz, int perm)
-{
-  if(mappages(kernel_pagetable, va, sz, pa, perm) != 0)
-    panic("kvmmap");
+void kvmmap(pagetable_t pgtbl, uint64 va, uint64 pa, uint64 sz, int perm) {
+    if (mappages(pgtbl, va, sz, pa, perm) != 0)
+        panic("kvmmap");
 }
 
 // translate a kernel virtual address to
 // a physical address. only needed for
 // addresses on the stack.
 // assumes va is page aligned.
-uint64
-kvmpa(uint64 va)
-{
-  uint64 off = va % PGSIZE;
-  pte_t *pte;
-  uint64 pa;
+uint64 kvmpa(pagetable_t pgtbl, uint64 va) {
+    uint64 off = va % PGSIZE;
+    pte_t *pte;
+    uint64 pa;
 
-  pte = walk(kernel_pagetable, va, 0);
-  if(pte == 0)
-    panic("kvmpa");
-  if((*pte & PTE_V) == 0)
-    panic("kvmpa");
-  pa = PTE2PA(*pte);
-  return pa+off;
+    pte = walk(pgtbl, va, 0);
+    if (pte == 0)
+        panic("kvmpa");
+    if ((*pte & PTE_V) == 0)
+        panic("kvmpa");
+    pa = PTE2PA(*pte);
+    return pa + off;
 }
 
 // Create PTEs for virtual addresses starting at va that refer to
@@ -383,26 +384,28 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 // Copy from user to kernel.
 // Copy len bytes to dst from virtual address srcva in a given page table.
 // Return 0 on success, -1 on error.
+// 将copyin改为转发到新函数
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
-  uint64 n, va0, pa0;
+    // uint64 n, va0, pa0;
 
-  while(len > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > len)
-      n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
+    // while(len > 0){
+    //   va0 = PGROUNDDOWN(srcva);
+    //   pa0 = walkaddr(pagetable, va0);
+    //   if(pa0 == 0)
+    //     return -1;
+    //   n = PGSIZE - (srcva - va0);
+    //   if(n > len)
+    //     n = len;
+    //   memmove(dst, (void *)(pa0 + (srcva - va0)), n);
 
-    len -= n;
-    dst += n;
-    srcva = va0 + PGSIZE;
-  }
-  return 0;
+    //   len -= n;
+    //   dst += n;
+    //   srcva = va0 + PGSIZE;
+    // }
+    // return 0;
+    return copyin_new(pagetable, dst, srcva, len);
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -412,40 +415,42 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
-  uint64 n, va0, pa0;
-  int got_null = 0;
+    // uint64 n, va0, pa0;
+    // int got_null = 0;
 
-  while(got_null == 0 && max > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > max)
-      n = max;
+    // while(got_null == 0 && max > 0){
+    //   va0 = PGROUNDDOWN(srcva);
+    //   pa0 = walkaddr(pagetable, va0);
+    //   if(pa0 == 0)
+    //     return -1;
+    //   n = PGSIZE - (srcva - va0);
+    //   if(n > max)
+    //     n = max;
 
-    char *p = (char *) (pa0 + (srcva - va0));
-    while(n > 0){
-      if(*p == '\0'){
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *p;
-      }
-      --n;
-      --max;
-      p++;
-      dst++;
-    }
+    //   char *p = (char *) (pa0 + (srcva - va0));
+    //   while(n > 0){
+    //     if(*p == '\0'){
+    //       *dst = '\0';
+    //       got_null = 1;
+    //       break;
+    //     } else {
+    //       *dst = *p;
+    //     }
+    //     --n;
+    //     --max;
+    //     p++;
+    //     dst++;
+    //   }
 
-    srcva = va0 + PGSIZE;
-  }
-  if(got_null){
-    return 0;
-  } else {
-    return -1;
-  }
+    //   srcva = va0 + PGSIZE;
+    // }
+    // if(got_null){
+    //   return 0;
+    // } else {
+    //   return -1;
+    // }
+
+    return copyinstr_new(pagetable, dst, srcva, max);
 }
 
 int kama_pgtblprint(pagetable_t pagetable, int depth) {
@@ -455,9 +460,9 @@ int kama_pgtblprint(pagetable_t pagetable, int depth) {
         if (pte & PTE_V) {
             printf("..");
             for (int j = 0; j < depth; ++j) {
-                printf("..");
+                printf(" ..");
             }
-            printf("%d: pte %p pa %p \n", i, pte, PTE2PA(pte));
+            printf("%d: pte %p pa %p\n", i, pte, PTE2PA(pte));
 
             // 如果该节点不是叶节点，则递归打印子节点
             if ((pte & (PTE_R | PTE_W | PTE_X)) == 0) {
@@ -472,4 +477,56 @@ int kama_pgtblprint(pagetable_t pagetable, int depth) {
 int kama_vmprint(pagetable_t pagetable) {
     printf("page table %p\n", pagetable);
     return kama_pgtblprint(pagetable, 0);
+}
+
+// 将src页表的一部分映射关系拷贝到dst页表中，只拷贝页表项，不拷贝实际的物理页内存
+int kama_kvmcopymappings(pagetable_t src, pagetable_t dst, uint64 start,
+                         uint64 sz) {
+    pte_t *pte;
+    uint64 pa, i;
+    uint flags;
+
+    // 将地址向上取整到页边界，防止重新映射已经映射的页，特别是在执行growproc操作时
+    for (i = PGROUNDUP(start); i < start + sz; i += PGSIZE) {
+        if ((pte = walk(src, i, 0)) == 0) {
+            panic("kvmcopymappings: pte should exist");
+        }
+
+        if ((*pte & PTE_V) == 0) {
+            panic("kvmcopymapping: page not present");
+        }
+
+        pa = PTE2PA(*pte);
+
+        //&~PTE_U表示将该页的权限设置为非用户页
+        // 必须设置权限，应为RISC-V中内核是无法直接访问用户页的
+        flags = PTE_FLAGS(*pte) & ~PTE_U;
+        // 将虚拟地址映射到物理地址,
+        // pa是起始的物理地址，i是起始的物理地址,flags是页表项的权限位
+        if (mappages(dst, i, PGSIZE, pa, flags) != 0) {
+            goto err;
+        }
+    }
+    return 0;
+
+err:
+    // 如果映射失败，解除目标页表中已映射的页表项
+    uvmunmap(dst, PGROUNDUP(start), (i - PGROUNDUP(start)) / PGSIZE, 0);
+    return -1;
+}
+
+// 与uvmdealloc功能类似，将程序内存从oldsz缩减到newsz
+uint64 kama_kvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz) {
+    if (newsz >= oldsz) { // 说明并没有要求减少地址空间
+        return oldsz;
+    }
+
+    if (PGROUNDUP(newsz) < PGROUNDUP(oldsz)) {
+        int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
+        // 解除虚拟内存和物理内存的映射关系, 以页为单位,
+        // 最后一位标识是否是否物理内存
+        uvmunmap(pagetable, PGROUNDUP(newsz), npages, 0);
+    }
+
+    return newsz;
 }
