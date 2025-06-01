@@ -46,10 +46,10 @@ usertrap(void)
   w_stvec((uint64)kernelvec);
 
   struct proc *p = myproc();
-  
+
   // save user program counter.
   p->trapframe->epc = r_sepc();
-  
+
   if(r_scause() == 8){
     // system call
 
@@ -77,8 +77,20 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
+  if (which_dev == 2) {
+      // 是否设置了时钟
+      // 时钟倒计时是否结束
+      // 没有其他时钟正在运行
+      if (p->kama_alarm_interval != 0 && --p->kama_alarm_ticks <= 0
+          && p->kama_alarm_goingoff == 0) {
+          p->kama_alarm_ticks = p->kama_alarm_interval;
+          *p->kama_alarm_trapframe = *p->trapframe;
+          p->trapframe->epc = (uint64)p->kama_alarm_handler;
+          p->kama_alarm_goingoff = 1;
+      }
+
+      yield();
+  }
 
   usertrapret();
 }
@@ -108,7 +120,7 @@ usertrapret(void)
 
   // set up the registers that trampoline.S's sret will use
   // to get to user space.
-  
+
   // set S Previous Privilege mode to User.
   unsigned long x = r_sstatus();
   x &= ~SSTATUS_SPP; // clear SPP to 0 for user mode
@@ -121,7 +133,7 @@ usertrapret(void)
   // tell trampoline.S the user page table to switch to.
   uint64 satp = MAKE_SATP(p->pagetable);
 
-  // jump to trampoline.S at the top of memory, which 
+  // jump to trampoline.S at the top of memory, which
   // switches to the user page table, restores user registers,
   // and switches to user mode with sret.
   uint64 fn = TRAMPOLINE + (userret - trampoline);
@@ -130,33 +142,31 @@ usertrapret(void)
 
 // interrupts and exceptions from kernel code go here via kernelvec,
 // on whatever the current kernel stack is.
-void 
-kerneltrap()
-{
-  int which_dev = 0;
-  uint64 sepc = r_sepc();
-  uint64 sstatus = r_sstatus();
-  uint64 scause = r_scause();
-  
-  if((sstatus & SSTATUS_SPP) == 0)
-    panic("kerneltrap: not from supervisor mode");
-  if(intr_get() != 0)
-    panic("kerneltrap: interrupts enabled");
+void kerneltrap() {
+    int which_dev = 0;
+    uint64 sepc = r_sepc();
+    uint64 sstatus = r_sstatus();
+    uint64 scause = r_scause();
 
-  if((which_dev = devintr()) == 0){
-    printf("scause %p\n", scause);
-    printf("sepc=%p stval=%p\n", r_sepc(), r_stval());
-    panic("kerneltrap");
-  }
+    if ((sstatus & SSTATUS_SPP) == 0)
+        panic("kerneltrap: not from supervisor mode");
+    if (intr_get() != 0)
+        panic("kerneltrap: interrupts enabled");
 
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING)
-    yield();
+    if ((which_dev = devintr()) == 0) {
+        printf("scause %p\n", scause);
+        printf("sepc=%p stval=%p\n", r_sepc(), r_stval());
+        panic("kerneltrap");
+    }
 
-  // the yield() may have caused some traps to occur,
-  // so restore trap registers for use by kernelvec.S's sepc instruction.
-  w_sepc(sepc);
-  w_sstatus(sstatus);
+    // give up the CPU if this is a timer interrupt.
+    if (which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING)
+        yield();
+
+    // the yield() may have caused some traps to occur,
+    // so restore trap registers for use by kernelvec.S's sepc instruction.
+    w_sepc(sepc);
+    w_sstatus(sstatus);
 }
 
 void
@@ -207,7 +217,7 @@ devintr()
     if(cpuid() == 0){
       clockintr();
     }
-    
+
     // acknowledge the software interrupt by clearing
     // the SSIP bit in sip.
     w_sip(r_sip() & ~2);
@@ -218,3 +228,21 @@ devintr()
   }
 }
 
+// 设置进程中时钟的相关属性
+int kama_sigalarm(int ticks, void (*handler)()) {
+    struct proc *p = myproc();
+    p->kama_alarm_interval = ticks;
+    p->kama_alarm_handler = handler;
+    p->kama_alarm_ticks = ticks;
+
+    return 0;
+}
+
+// 将进程恢复至alarm中断之前的状态
+int kama_sigreturn() {
+    struct proc *p = myproc();
+    *p->trapframe = *p->kama_alarm_trapframe;
+    p->kama_alarm_goingoff = 0;
+
+    return 0;
+}
