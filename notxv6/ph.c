@@ -16,6 +16,9 @@ struct entry {
 struct entry *table[NBUCKET];
 int keys[NKEYS];
 int nthread = 1;
+// pthread_mutex_t lock;
+// 改为给每个散列桶声明一把锁
+pthread_mutex_t lock[NBUCKET];
 
 double
 now()
@@ -25,34 +28,35 @@ now()
  return tv.tv_sec + tv.tv_usec / 1000000.0;
 }
 
-static void 
-insert(int key, int value, struct entry **p, struct entry *n)
-{
-  struct entry *e = malloc(sizeof(struct entry));
-  e->key = key;
-  e->value = value;
-  e->next = n;
-  *p = e;
+static void insert(int key, int value, struct entry **p, struct entry *n) {
+    struct entry *e = malloc(sizeof(struct entry));
+    e->key = key;
+    e->value = value;
+    e->next = n;
+    *p = e;
 }
 
-static 
-void put(int key, int value)
-{
-  int i = key % NBUCKET;
+// 往桶排序中添加元素
+static void put(int key, int value) {
+    // pthread_mutex_lock(&lock);
 
-  // is the key already present?
-  struct entry *e = 0;
-  for (e = table[i]; e != 0; e = e->next) {
-    if (e->key == key)
-      break;
-  }
-  if(e){
-    // update the existing key.
-    e->value = value;
-  } else {
-    // the new is new.
-    insert(key, value, &table[i], table[i]);
-  }
+    int i = key % NBUCKET;
+    pthread_mutex_lock(&lock[i]);
+    // is the key already present?
+    struct entry *e = 0;
+    for (e = table[i]; e != 0; e = e->next) {
+        if (e->key == key)
+            break;
+    }
+    if (e) {
+        // update the existing key.
+        e->value = value;
+    } else {
+        // the new is new.
+        insert(key, value, &table[i], table[i]);
+    }
+
+    pthread_mutex_unlock(&lock[i]);
 }
 
 static struct entry*
@@ -103,6 +107,8 @@ main(int argc, char *argv[])
   void *value;
   double t1, t0;
 
+  pthread_mutex_init(&lock, NULL);
+
   if (argc < 2) {
     fprintf(stderr, "Usage: %s nthreads\n", argv[0]);
     exit(-1);
@@ -117,7 +123,11 @@ main(int argc, char *argv[])
 
   //
   // first the puts
-  //
+  // 执行put前初始化锁
+  for (int i = 0; i < NBUCKET; ++i) {
+      pthread_mutex_init(&lock[i], NULL);
+  }
+
   t0 = now();
   for(int i = 0; i < nthread; i++) {
     assert(pthread_create(&tha[i], NULL, put_thread, (void *) (long) i) == 0);
