@@ -16,71 +16,95 @@ void kernelvec();
 
 extern int devintr();
 
-void
-trapinit(void)
-{
-  initlock(&tickslock, "time");
+void trapinit(void) {
+    initlock(&tickslock, "time");
 }
 
 // set up to take exceptions and traps while in the kernel.
-void
-trapinithart(void)
-{
-  w_stvec((uint64)kernelvec);
+void trapinithart(void) {
+    w_stvec((uint64)kernelvec);
 }
 
 //
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
 //
-void
-usertrap(void)
-{
-  int which_dev = 0;
+void usertrap(void) {
+    int which_dev = 0;
 
-  if((r_sstatus() & SSTATUS_SPP) != 0)
-    panic("usertrap: not from user mode");
+    if ((r_sstatus() & SSTATUS_SPP) != 0)
+        panic("usertrap: not from user mode");
 
-  // send interrupts and exceptions to kerneltrap(),
-  // since we're now in the kernel.
-  w_stvec((uint64)kernelvec);
+    // send interrupts and exceptions to kerneltrap(),
+    // since we're now in the kernel.
+    w_stvec((uint64)kernelvec);
 
-  struct proc *p = myproc();
-  
-  // save user program counter.
-  p->trapframe->epc = r_sepc();
-  
-  if(r_scause() == 8){
-    // system call
+    struct proc *p = myproc();
 
-    if(p->killed)
-      exit(-1);
+    // save user program counter.
+    p->trapframe->epc = r_sepc();
 
-    // sepc points to the ecall instruction,
-    // but we want to return to the next instruction.
-    p->trapframe->epc += 4;
+    if (r_scause() == 8) {
+        // system call
 
-    // an interrupt will change sstatus &c registers,
-    // so don't enable until done with those registers.
-    intr_on();
+        if (p->killed)
+            exit(-1);
 
-    syscall();
-  } else if((which_dev = devintr()) != 0){
-    // ok
-  } else {
-    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
-    p->killed = 1;
-  }
+        // sepc points to the ecall instruction,
+        // but we want to return to the next instruction.
+        p->trapframe->epc += 4;
 
-  if(p->killed)
-    exit(-1);
+        // an interrupt will change sstatus &c registers,
+        // so don't enable until done with those registers.
+        intr_on();
 
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
+        syscall();
+    } else if ((which_dev = devintr()) != 0) {
+        // ok
+    }
+    //  else if (r_scause() == 13 || r_scause() == 15) { //
+    // 惰性分配导致的缺页异常
+    //     // 获取引发缺页异常的虚拟地址
+    //     uint64 fault_va = r_stval();
+    //     // 分配的物理地址
+    //     char *pa = 0;
+    //     // 判断fault_va是否位于进程栈空间之中
+    //     if (PGROUNDUP(p->trapframe->sp) - 1 < fault_va && fault_va < p->sz
+    //         && (pa = kalloc()) != 0) {
+    //         memset(pa, 0, PGSIZE);
+    //         // 物理内存映射
+    //         if (mappages(p->pagetable, PGROUNDDOWN(fault_va), PGSIZE,
+    //         (uint64)pa,
+    //                      PTE_R | PTE_W | PTE_X | PTE_U)
+    //             != 0) {
+    //             printf("lazy alloc: failed to map page\n");
+    //             kfree(pa);
+    //             p->killed = 1;
+    //         }
+    //     }
 
-  usertrapret();
+    // }
+    else {
+        uint64 va = r_stval();
+        if ((r_scause() == 13 || r_scause() == 15)
+            && kama_uvmshouldallocate(va)) {
+            kama_uvmlazyallocate(va); // 分配物理内存
+        } else {
+            printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(),
+                   p->pid);
+            printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+            p->killed = 1;
+        }
+    }
+
+    if (p->killed)
+        exit(-1);
+
+    // give up the CPU if this is a timer interrupt.
+    if (which_dev == 2)
+        yield();
+
+    usertrapret();
 }
 
 //
@@ -108,7 +132,7 @@ usertrapret(void)
 
   // set up the registers that trampoline.S's sret will use
   // to get to user space.
-  
+
   // set S Previous Privilege mode to User.
   unsigned long x = r_sstatus();
   x &= ~SSTATUS_SPP; // clear SPP to 0 for user mode
@@ -121,7 +145,7 @@ usertrapret(void)
   // tell trampoline.S the user page table to switch to.
   uint64 satp = MAKE_SATP(p->pagetable);
 
-  // jump to trampoline.S at the top of memory, which 
+  // jump to trampoline.S at the top of memory, which
   // switches to the user page table, restores user registers,
   // and switches to user mode with sret.
   uint64 fn = TRAMPOLINE + (userret - trampoline);
@@ -130,33 +154,31 @@ usertrapret(void)
 
 // interrupts and exceptions from kernel code go here via kernelvec,
 // on whatever the current kernel stack is.
-void 
-kerneltrap()
-{
-  int which_dev = 0;
-  uint64 sepc = r_sepc();
-  uint64 sstatus = r_sstatus();
-  uint64 scause = r_scause();
-  
-  if((sstatus & SSTATUS_SPP) == 0)
-    panic("kerneltrap: not from supervisor mode");
-  if(intr_get() != 0)
-    panic("kerneltrap: interrupts enabled");
+void kerneltrap() {
+    int which_dev = 0;
+    uint64 sepc = r_sepc();
+    uint64 sstatus = r_sstatus();
+    uint64 scause = r_scause();
 
-  if((which_dev = devintr()) == 0){
-    printf("scause %p\n", scause);
-    printf("sepc=%p stval=%p\n", r_sepc(), r_stval());
-    panic("kerneltrap");
-  }
+    if ((sstatus & SSTATUS_SPP) == 0)
+        panic("kerneltrap: not from supervisor mode");
+    if (intr_get() != 0)
+        panic("kerneltrap: interrupts enabled");
 
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING)
-    yield();
+    if ((which_dev = devintr()) == 0) {
+        printf("scause %p\n", scause);
+        printf("sepc=%p stval=%p\n", r_sepc(), r_stval());
+        panic("kerneltrap");
+    }
 
-  // the yield() may have caused some traps to occur,
-  // so restore trap registers for use by kernelvec.S's sepc instruction.
-  w_sepc(sepc);
-  w_sstatus(sstatus);
+    // give up the CPU if this is a timer interrupt.
+    if (which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING)
+        yield();
+
+    // the yield() may have caused some traps to occur,
+    // so restore trap registers for use by kernelvec.S's sepc instruction.
+    w_sepc(sepc);
+    w_sstatus(sstatus);
 }
 
 void
@@ -207,7 +229,7 @@ devintr()
     if(cpuid() == 0){
       clockintr();
     }
-    
+
     // acknowledge the software interrupt by clearing
     // the SSIP bit in sip.
     w_sip(r_sip() & ~2);
